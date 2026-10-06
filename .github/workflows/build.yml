@@ -87,6 +87,9 @@ jobs:
           sh-elf-size memoanki.elf
           zip -r build.zip build
 
+      - name: Install Python dependencies (Pillow for the simulation)
+        run: python3 -m pip install --user pillow
+
       - name: Host simulation (runs the real UI code, saves screenshots)
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
