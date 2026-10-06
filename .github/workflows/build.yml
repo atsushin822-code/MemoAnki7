@@ -1,0 +1,120 @@
+name: Build MemoAnki EX
+
+# リポジトリには「ソースzip」と、このymlの2つだけを置けばOK。
+# zipをその場で展開して(中身が直下でもフォルダ入りでも可)、そのままビルドします。
+
+on:
+  push:
+    branches: ["**"]
+    tags: "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        type: string
+        description: "Release を作るタグ名(空ならArtifactのみ)"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build EX-word addon (XD-A8500 / DATAPLUS 5)
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract source zip
+        run: |
+          set -euo pipefail
+          ZIP=""
+          for f in *.zip; do
+            [ -f "$f" ] || continue
+            [ "$f" = "build.zip" ] && continue
+            ZIP="$f"; break
+          done
+          [ -n "$ZIP" ] || { echo "::error::リポジトリ直下にソースのzipが見つかりません"; exit 1; }
+          echo "Using $ZIP"
+          rm -rf _src && mkdir _src
+          unzip -q "$ZIP" -d _src
+          MK="$(find _src -name Makefile -not -path '*/tools/*' | awk '{print length, $0}' | sort -n | head -1 | cut -d' ' -f2-)"
+          [ -n "$MK" ] || { echo "::error::zipの中にMakefileがありません"; exit 1; }
+          DIR="$(dirname "$MK")"
+          echo "Project dir: $DIR"
+          echo "PROJECT_DIR=$GITHUB_WORKSPACE/$DIR" >> "$GITHUB_ENV"
+
+      - name: Validate deck conversion tool
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+          python3 tools/csv_to_deck.py data/decks/sample.csv \
+            --deck "My Sample Deck" --output /tmp/sample-deck.json
+          test -s /tmp/sample-deck.json
+
+      - name: Generate device data files (sample WIKI.DAT / IMPORT.DAT)
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+          mkdir -p data/device
+          [ -f data/device/WIKI.DAT ] || python3 tools/wikipedia_prepare.py data/wikipedia/sample.jsonl -o data/device/WIKI.DAT
+          [ -f data/device/IMPORT.DAT ] || python3 tools/csv_to_deck.py data/decks/sample.csv --deck "英単語" --dat data/device/IMPORT.DAT
+          ls -la data/device
+
+      - name: Install devkitSH4 toolchain
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/dk" && cd "$HOME/dk"
+          curl -sSfL https://github.com/MaxSignal/buildscripts/releases/download/Linux/devkitPro.tar.gz | tar -zxf -
+          ls devkitPro
+
+      - name: Build (build/ja and build/cn)
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+          export DEVKITPRO="$HOME/dk/devkitPro"
+          export DEVKITSH4="$DEVKITPRO/devkitSH4"
+          export PATH="$DEVKITPRO/tools/bin:$DEVKITSH4/bin:$PATH"
+          make
+          test -s build/ja/MEMAN/memoanki.d01
+          test -s build/cn/MEMAN/memoanki.d01
+          test -s build/ja/MEMAN/infogt5.htm
+          test -s build/ja/MEMAN/WIKI.DAT
+          test -s build/ja/MEMAN/IMPORT.DAT
+          find build -type f | sort
+          sh-elf-size memoanki.elf
+          zip -r build.zip build
+
+      - name: Host simulation (runs the real UI code, saves screenshots)
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+          export DEVKITPRO="$HOME/dk/devkitPro"
+          export DEVKITSH4="$DEVKITPRO/devkitSH4"
+          export PATH="$DEVKITPRO/tools/bin:$DEVKITSH4/bin:$PATH"
+          tools/sim/run_sim.sh
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MemoAnki-EX-build
+          path: ${{ env.PROJECT_DIR }}/build.zip
+
+      - name: Upload simulated screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: MemoAnki-EX-screenshots
+          path: ${{ env.PROJECT_DIR }}/tools/sim/out/**/*.png
+          if-no-files-found: ignore
+
+      - name: Publish release
+        if: ${{ startsWith(github.ref, 'refs/tags/') || inputs.tag != '' }}
+        run: |
+          set -euo pipefail
+          TAG="$RELEASE_TAG"
+          [ -n "$TAG" ] || TAG="${GITHUB_REF#refs/tags/}"
+          gh release create "$TAG" -t "$TAG" \
+            -n "Automatic build of $(git rev-parse HEAD)." "$PROJECT_DIR/build.zip"
