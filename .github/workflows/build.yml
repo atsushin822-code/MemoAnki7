@@ -121,3 +121,41 @@ jobs:
           [ -n "$TAG" ] || TAG="${GITHUB_REF#refs/tags/}"
           gh release create "$TAG" -t "$TAG" \
             -n "Automatic build of $(git rev-parse HEAD)." "$PROJECT_DIR/build.zip"
+
+  web-tests:
+    name: Web converter tests (web/index.html)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract source zip
+        run: |
+          set -euo pipefail
+          ZIP=""
+          for f in *.zip; do
+            [ -f "$f" ] || continue
+            [ "$f" = "build.zip" ] && continue
+            ZIP="$f"; break
+          done
+          [ -n "$ZIP" ] || { echo "::error::リポジトリ直下にソースのzipが見つかりません"; exit 1; }
+          rm -rf _src && mkdir _src
+          unzip -q "$ZIP" -d _src
+          MK="$(find _src -name Makefile -not -path '*/tools/*' | awk '{print length, $0}' | sort -n | head -1 | cut -d' ' -f2-)"
+          [ -n "$MK" ] || { echo "::error::zipの中にMakefileがありません"; exit 1; }
+          echo "PROJECT_DIR=$GITHUB_WORKSPACE/$(dirname "$MK")" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install test dependencies
+        working-directory: ${{ env.PROJECT_DIR }}/web/tests
+        run: npm install --no-audit --no-fund
+
+      - name: Run web converter tests
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+          NODE_PATH=web/tests/node_modules node web/tests/run.js
+          node web/tests/html_run.js
